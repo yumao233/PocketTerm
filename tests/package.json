@@ -1,0 +1,14 @@
+{
+  "name": "webshell-tests",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "test": "node --test --test-concurrency=1",
+    "test:parallel": "node --test",
+    "build:backend": "cd ../backend && go build -o bin/webshell ./cmd/webshell"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}

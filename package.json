@@ -1,0 +1,24 @@
+{
+  "name": "better-web-agent",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A Go-implemented Webshell backend: manage multiple Shell windows simultaneously in the browser, where each Shell is a real local SSH terminal session, and the browser interacts bidirectionally via WebSocket (supports running commands like `bash`, `ping`, etc.).",
+  "directories": {
+    "doc": "docs",
+    "test": "tests"
+  },
+  "scripts": {
+    "dev": "concurrently -k -n backend,frontend -c blue,green \"npm:dev:backend\" \"npm:dev:frontend\"",
+    "dev:backend": "cd backend && (./bin/webshell || go run ./cmd/webshell)",
+    "dev:frontend": "cd frontend && npm run dev",
+    "backend:build": "cd backend && go build -o ./bin/webshell ./cmd/webshell",
+    "test": "bash tests/run-all.sh",
+    "test:backend": "cd backend && go test ./...",
+    "test:integration": "cd tests && node --test --test-concurrency=1"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.4"
+  },
+  "author": "",
+  "license": "ISC"
+}

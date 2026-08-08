@@ -1,0 +1,29 @@
+# Binaries
+bin/
+/tmp/
+
+# Go
+*.exe
+*.test
+
+# Node
+node_modules/
+web/dist/
+web/.vite/
+
+# Data
+data/
+config.json
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test temp
+/tmp/webshell-test-*
