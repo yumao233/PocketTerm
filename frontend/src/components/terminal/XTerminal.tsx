@@ -187,9 +187,11 @@ export const XTerminal = forwardRef<XTerminalHandle, XTerminalProps>(
       });
       ro.observe(container);
 
-      // 监听 window 尺寸变化(如浏览器窗口缩放、布局抖动):容器尺寸若随之变化,
-      // ResizeObserver 通常已能捕获,但某些场景(父级 flex/绝对定位固定)下容器尺寸不变而视口变化,
-      // 仍需主动触发一次 safeFit 以重新计算 xterm 的 cols/rows,避免终端尺寸与可视区脱节。
+      // Also listen for window resize (browser viewport zoom, layout jitter): if the container
+      // size changes accordingly, the ResizeObserver usually catches it. But in some cases (a fixed
+      // parent flex / absolute-positioned parent) the container size stays the same while the
+      // viewport changes, so we still proactively trigger a safeFit to recompute xterm's cols/rows,
+      // preventing the terminal size from drifting out of sync with the visible area.
       const onWindowResize = () => {
         fitAndResize(liveRef.current, containerRef.current);
       };

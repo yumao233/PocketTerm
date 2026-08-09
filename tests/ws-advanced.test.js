@@ -1,16 +1,20 @@
-// ws-advanced.test.js — WebSocket 并发与协议边界（黑盒真实后端）。
+// ws-advanced.test.js — WebSocket concurrency and protocol boundaries (black-box real backend).
 //
-// 聚焦 PTY/WS 核心域在真实后端下的端到端并发与降级行为，补 Go 单测（manager_test 在
-// channel 层、frames_test 在纯函数层、conn_test 在 httptest 局部 server）之外的黑盒
-// 缺口：
-//   - 多 WS 订阅同一 session 的 fan-out：两个连接都收到同一行输出；一个断开不影响
-//     另一个，PTY 仍存活（disconnect≠Kill，AGENTS §8）。
-//   - disconnect≠Kill 配合 HTTP /sessions 列表确认：WS 突然断开后 GET /sessions/:id
-//     仍 running、列表仍含它，重连 WS 仍能交互。
-//   - resize 缺字段 / 类型错误降级：`{"type":"resize"}`（0×0）、字符串类型的 cols 均
-//     不中断连接；随后一次正常 resize 仍能改变 PTY 尺寸（证明降级未破坏会话）。
-//   - 未知 control type 降级为 data：`{"type":"frobnicate"}` 进 stdin 被 read-loop 回显。
-//   - WS 连不存在的 session id（正确 token）→ 升级前 1006。
+// Focuses on the end-to-end concurrency and degradation behavior of the PTY/WS core domain on a
+// real backend, filling the black-box gaps beyond the Go unit tests (manager_test at the channel
+// layer, frames_test at the pure-function layer, conn_test on an httptest local server):
+//   - multi-WS fan-out subscribing to the same session: both connections receive the same output
+//     line; one disconnecting does not affect the other, and the PTY stays alive (disconnect≠Kill,
+//     AGENTS §8).
+//   - disconnect≠Kill confirmed together with the HTTP /sessions list: after an abrupt WS close,
+//     GET /sessions/:id is still running, the list still contains it, and reconnecting the WS
+//     still works interactively.
+//   - resize degradation on missing fields / wrong types: `{"type":"resize"}` (0×0) and
+//     string-typed cols both do not break the connection; a subsequent normal resize still changes
+//     the PTY size (proving the degradation did not break the session).
+//   - unknown control type degrades to data: `{"type":"frobnicate"}` enters stdin and is echoed
+//     by the read loop.
+//   - WS connecting to a non-existent session id (with a valid token) → 1006 before the upgrade.
 
 import { describe, test, before, after } from "node:test";
 import assert from "node:assert/strict";
@@ -59,7 +63,7 @@ describe("WS advanced: fan-out, disconnect≠Kill, resize degradation", () => {
     return sess.body.data.id;
   }
 
-  // 1. 多订阅者 fan-out：两个 WS 都应收到同一条输出；断开一个不影响另一个。
+  // 1. Multi-subscriber fan-out: both WS connections should receive the same output line; disconnecting one does not affect the other.
   test("multi-subscriber: two WS connections both receive the same output line", async () => {
     const sid = await startSession(ECHO_LOOP, "fanout");
     const wsA = await connectWS(b.wsBaseUrl, sid, token);
@@ -67,7 +71,7 @@ describe("WS advanced: fan-out, disconnect≠Kill, resize degradation", () => {
     try {
       wsB = await connectWS(b.wsBaseUrl, sid, token);
 
-      // 先注册两个 collector，再发送：避免 echo 在 listener 注册前到达。
+      // Register both collectors before sending: avoid the echo arriving before the listener is registered.
       const a = collectUntil(wsA, (s) => s.includes("got:hello-fanout"), 6000);
       const bb = collectUntil(wsB, (s) => s.includes("got:hello-fanout"), 6000);
       wsA.send("hello-fanout\n");
@@ -75,7 +79,7 @@ describe("WS advanced: fan-out, disconnect≠Kill, resize degradation", () => {
       assert.ok(ra.ok, `wsA should receive echo; actual: ${JSON.stringify(ra.messages.join(""))}`);
       assert.ok(rb.ok, `wsB should receive echo; actual: ${JSON.stringify(rb.messages.join(""))}`);
 
-      // abrupt close wsA（不发 close frame）：仅退订，PTY 不杀，wsB 不受影响。
+      // Abruptly close wsA (no close frame): only unsubscribes, the PTY is not killed, and wsB is unaffected.
       wsA.close();
       await waitForClose(wsA, 3000);
       assert.equal(
@@ -83,19 +87,19 @@ describe("WS advanced: fan-out, disconnect≠Kill, resize degradation", () => {
         WebSocket.OPEN,
         "wsB must remain OPEN after wsA abrupt close",
       );
-      // wsB 发 close frame 干净退出并 Kill
+      // wsB sends a close frame for a clean exit and Kill.
       wsB.send(JSON.stringify({ type: "close" }));
       await waitForClose(wsB, 4000);
     } finally {
       try { wsA.close(); } catch { /* already closed */ }
       if (wsB) { try { wsB.close(); } catch { /* already closed */ } }
     }
-    // close frame 已触发 Kill → session 从内存池移除 → GET 1006
+    // The close frame already triggered Kill → the session is removed from the in-memory pool → GET 1006
     const after = await apiFetch(b.baseUrl, "GET", `/api/v1/sessions/${sid}`, { token });
     assert.equal(after.body.code, 1006);
   });
 
-  // 2. disconnect≠Kill + HTTP 列表确认：WS 突然断开后 PTY 仍 running、可重连交互。
+  // 2. disconnect≠Kill + HTTP list confirmation: after an abrupt WS close the PTY is still running and reconnectable interactively.
   test("disconnect≠Kill: abrupt WS close keeps the PTY alive and reconnectable", async () => {
     const sid = await startSession(ECHO_LOOP, "disc-kill");
     const listBefore = await apiFetch(b.baseUrl, "GET", "/api/v1/sessions", { token });
@@ -106,14 +110,14 @@ describe("WS advanced: fan-out, disconnect≠Kill, resize degradation", () => {
     await waitForClose(ws, 3000);
     await sleep(150);
 
-    // PTY 仍存活
+    // The PTY is still alive.
     const got = await apiFetch(b.baseUrl, "GET", `/api/v1/sessions/${sid}`, { token });
     assert.equal(got.body.code, 0);
     assert.equal(got.body.data.status, "running");
     const listAfter = await apiFetch(b.baseUrl, "GET", "/api/v1/sessions", { token });
     assert.ok(listAfter.body.data.sessions.some((s) => s.id === sid));
 
-    // 重连 WS 仍能交互
+    // Reconnecting the WS still works interactively.
     const ws2 = await connectWS(b.wsBaseUrl, sid, token);
     try {
       ws2.send("still-alive\n");
@@ -132,17 +136,18 @@ describe("WS advanced: fan-out, disconnect≠Kill, resize degradation", () => {
     assert.equal(after.body.code, 1006);
   });
 
-  // 3. resize 缺字段 / 类型错误降级：不中断连接，且后续正常 resize 仍生效。
+  // 3. resize degradation on missing fields / wrong types: does not break the connection, and a subsequent normal resize still takes effect.
   test("resize degradation: missing fields and type errors do not break the session", async () => {
     const sid = await startSession(STTY_LOOP, "resize-degrade");
     const ws = await connectWS(b.wsBaseUrl, sid, token);
     try {
-      // 单一 message 累积器 + 按"第 n 个 SIZE=" 读取，避免多次 collectUntil 叠加 listener。
+      // A single message accumulator; read "the latest SIZE=" instead of "the n-th" to avoid stacking listeners across multiple collectUntil calls.
       const seen = [];
       ws.on("message", (d) => seen.push(d.toString("utf8")));
-      // 等待"最新一次" SIZE= 读取等于期望值；不计第几次，因为畸形 resize 会作为
-      // 一行 stdin 被回显（或与下一条 probe 合并），额外产生 SIZE=24 80，按序号取
-      // 会被污染。只看迄今为止最后一次匹配即可。
+      // Wait for the "most recent" SIZE= reading to equal the expected value; do not care which
+      // occurrence it is, because a malformed resize is echoed as a line of stdin (or merged with
+      // the next probe), producing an extra SIZE=24 80 that would pollute an index-based read.
+      // Just look at the last match so far.
       const waitSizeEquals = async (want, timeoutMs = 5000) => {
         const deadline = Date.now() + timeoutMs;
         while (Date.now() < deadline) {
@@ -161,18 +166,19 @@ describe("WS advanced: fan-out, disconnect≠Kill, resize degradation", () => {
       const first = await waitSizeEquals({ rows: 24, cols: 80 });
       assert.ok(first, "should receive an initial SIZE=24 80 reading");
 
-      // 缺 cols/rows（→ InputResize, Cols=0,Rows=0）：初始 lastCols/lastRows 也是 0,0，
-      // 被幂等 dedup 跳过，PTY 不变；无论如何连接不能断。
+      // Missing cols/rows (→ InputResize, Cols=0, Rows=0): the initial lastCols/lastRows are also
+      // 0,0, so it is skipped by the idempotent dedup and the PTY is unchanged; in any case the
+      // connection must not break.
       ws.send(JSON.stringify({ type: "resize" }));
       await sleep(250);
       assert.equal(ws.readyState, WebSocket.OPEN, "must remain OPEN after resize w/o cols/rows");
 
-      // cols 为字符串类型 → JSON 解析失败 → 降级为 data → 进 stdin，shell 报错但不断连。
+      // cols is a string type → JSON parsing fails → degrades to data → enters stdin; the shell errors but the connection does not break.
       ws.send(JSON.stringify({ type: "resize", cols: "wide", rows: "tall" }));
       await sleep(250);
       assert.equal(ws.readyState, WebSocket.OPEN, "must remain OPEN after malformed resize types");
 
-      // 一次正常 resize 仍能改变 PTY 尺寸（证明降级未破坏会话）。
+      // A normal resize still changes the PTY size (proving the degradation did not break the session).
       ws.send(JSON.stringify({ type: "resize", cols: 100, rows: 40 }));
       await sleep(300);
       ws.send("p\n");
@@ -188,7 +194,7 @@ describe("WS advanced: fan-out, disconnect≠Kill, resize degradation", () => {
     }
   });
 
-  // 4. 未知 control type 降级为 data：valid JSON 但 type 非 resize/close → 进 stdin。
+  // 4. Unknown control type degrades to data: valid JSON but type is not resize/close → enters stdin.
   test("unknown control type degrades to data (forwarded to PTY stdin)", async () => {
     const sid = await startSession(ECHO_LOOP, "unknown-type");
     const ws = await connectWS(b.wsBaseUrl, sid, token);
@@ -210,7 +216,7 @@ describe("WS advanced: fan-out, disconnect≠Kill, resize degradation", () => {
     }
   });
 
-  // 5. WS 连不存在的 session id（正确 token）→ 升级前 1006。
+  // 5. WS to a non-existent session id (valid token) → 1006 before the upgrade.
   test("WS to a non-existent session id (valid token) → 1006 before upgrade", async () => {
     const fakeId = "00000000-0000-0000-0000-000000000000";
     const res = await fetch(`${b.baseUrl}/api/v1/ws/${fakeId}?token=${token}`);

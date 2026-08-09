@@ -1,16 +1,19 @@
-// routes-cors.test.js — 路由 / CORS / 系统端点 / 请求绑定 边界（黑盒真实后端）。
+// routes-cors.test.js — routing / CORS / system endpoints / request-binding boundaries (black-box real backend).
 //
-// 补齐 Go 单测未覆盖、或未穿完整中间件链（Recovery/Logger/CORS + 真实 router 装配）的
-// HTTP 层边界：
-//   - 未知路由 → 404（gin 默认，非 envelope）
-//   - OPTIONS 预检穿完整中间件链 → 204，且不触发 Auth（即使目标是 authed group 的路由）
-//   - CORS 三分支真实响应头：wildcard echo `*`（不带 credentials）、specific origin 匹配
-//     → echo + Allow-Credentials:true + Vary:Origin、不匹配 / 无 Origin → 无 ACAO
-//   - /api/v1/system/stats：无 token → 1004，带 admin token → code 0 + 结构化快照
-//   - 非 JSON body 经 ShouldBindJSON 失败 → 1007（setup / login / template create），且
-//     bind 失败不会误初始化系统（check-setup 仍 false）
+// Fills the HTTP-layer gaps that Go unit tests do not cover, or that do not exercise the full
+// middleware chain (Recovery/Logger/CORS + real router assembly):
+//   - unknown route → 404 (gin default, non-envelope)
+//   - OPTIONS preflight through the full middleware chain → 204 without triggering Auth
+//     (even when the target is an authed-group route)
+//   - CORS three branches with real response headers: wildcard echoes `*` (no credentials);
+//     specific origin match → echo + Allow-Credentials:true + Vary:Origin; no match / no Origin
+//     → no ACAO
+//   - /api/v1/system/stats: no token → 1004, with admin token → code 0 + a structured snapshot
+//   - non-JSON body failing ShouldBindJSON → 1007 (setup / login / template create), and the
+//     bind failure must not accidentally initialize the system (check-setup stays false)
 //
-// CORS 三分支依赖 helpers 的 cors 选项（默认 ['*']，传具体 origin 列表走 echo 分支）。
+// The CORS three branches rely on the helpers cors option (default ['*']; pass a specific origin
+// list to exercise the echo branch).
 
 import { describe, test, before, after } from "node:test";
 import assert from "node:assert/strict";

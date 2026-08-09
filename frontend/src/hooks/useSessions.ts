@@ -56,13 +56,14 @@ export function useSessions(): UseSessionsResult {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  // --- URL nav: 把当前焦点终端 id 作为 ?nav=<id> 写入 URL，刷新时据其恢复焦点 ---
+  // --- URL nav: write the focused terminal id into the URL as ?nav=<id>, restore focus on refresh. ---
   const [searchParams, setSearchParams] = useSearchParams()
-  // 挂载时一次性快照刷新带入的 nav；之后不再随 URL 变化（写入不会触发重新恢复）
+  // Snapshot once on mount the nav carried over from a refresh; afterwards it does not follow URL changes (our own writes must not trigger a re-restore).
   const [initialNav] = useState(() => searchParams.get("nav"))
   const navConsumedRef = useRef(false)
-  // 用 ref 镜像 searchParams/setSearchParams，让写 URL 的 effect 仅依赖 [activeId]，
-  // 打破"写 URL → searchParams 变 → effect 重跑"的循环（§13：ref 读最新值模式）
+  // Mirror searchParams/setSearchParams via refs so the URL-writing effect depends only on
+  // [activeId], breaking the "write URL → searchParams changes → effect re-runs" loop (§13:
+  // read-latest-value-via-ref pattern).
   const searchParamsRef = useRef(searchParams)
   searchParamsRef.current = searchParams
   const setSearchParamsRef = useRef(setSearchParams)
@@ -141,9 +142,9 @@ export function useSessions(): UseSessionsResult {
       return
     }
     const exists = activeId !== null && sessions.some((s) => s.id === activeId)
-    if (exists) return // 当前焦点有效，保持（保留用户切换）
+    if (exists) return // current focus is valid, keep it (preserve the user's tab switch)
 
-    // 焦点无效：仅首次尝试用 URL 带来的 nav 恢复，找不到才回退最后一个（最新）
+    // Focus invalid: only on the first attempt try to restore from the nav carried in the URL; if not found, fall back to the last (most recent) session.
     const desired = !navConsumedRef.current ? initialNav : null
     navConsumedRef.current = true
     if (desired && sessions.some((s) => s.id === desired)) {
@@ -153,7 +154,7 @@ export function useSessions(): UseSessionsResult {
     }
   }, [sessions, activeId, initialNav])
 
-  /** activeId 变化 → 把焦点终端写回 URL（replace，不污染后退历史）。 */
+  /** activeId changed → write the focused terminal back to the URL (replace, to avoid polluting back-history). */
   useEffect(() => {
     const sp = new URLSearchParams(searchParamsRef.current)
     if (activeId) sp.set("nav", activeId)

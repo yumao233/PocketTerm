@@ -1,32 +1,37 @@
-// security.test.js — 端到端安全性边界集合（黑盒真实后端）。
+// security.test.js — end-to-end security boundary suite (black-box real backend).
 //
-// 聚焦那些需要"完整 HTTP/WS 后端 + 真实 JWT 解析/校验链路"才能体现的安全属性，
-// 刻意不与 Go 单测（auth_test / middleware_test / handler_test 已在进程内伪造 token
-// 覆盖）重复，而是从浏览器/外部系统视角再次钉死契约：
-//   - sanitizeUser 不泄漏 password_hash：setup / login / sso_login / me 四条身份路径
-//     端到端均不携带 bcrypt hash（AGENTS §10 契约）。
-//   - JWT alg=none 伪造被拒（§14 红线：Parse 的 keyFunc 强制 *SigningMethodHMAC）。
-//   - JWT payload 篡改（改 uid）因签名失配被拒 —— 证明签名覆盖全部 claims。
-//   - 跨后端 secret 隔离：A 后端签发的 token 对 B 后端无效（helpers 随机 secret 的意义）。
-//   - logout 是 stateless no-op：登出后同 token 仍可鉴权（无服务端黑名单，§6 契约）。
-//   - 已过期 token（jwtTtl=-1 → 签发即过期）端到端被拒。
-//   - WS 错误/伪造 query token 在升级前被拒（1004）。
+// Focuses on the security properties that only show up with a full HTTP/WS backend + a real JWT
+// parsing/validation chain. It deliberately does not duplicate the Go unit tests (auth_test /
+// middleware_test / handler_test already cover these in-process with forged tokens); instead it
+// re-locks the contract from the browser / external-system perspective:
+//   - sanitizeUser never leaks password_hash: the four identity paths setup / login / sso_login /
+//     me all carry no bcrypt hash end-to-end (AGENTS §10 contract).
+//   - JWT alg=none forgery is rejected (§14 red line: Parse's keyFunc enforces *SigningMethodHMAC).
+//   - JWT payload tampering (changing uid) is rejected due to a signature mismatch — proving the
+//     signature covers every claim.
+//   - Cross-backend secret isolation: a token issued by backend A is invalid against backend B
+//     (the point of the helpers' random secret).
+//   - logout is a stateless no-op: after logout the same token still authenticates (no server-side
+//     blacklist, §6 contract).
+//   - An already-expired token (jwtTtl=-1 → issued already expired) is rejected end-to-end.
+//   - WS garbage / forged query tokens are rejected before the upgrade (1004).
 //
-// 每个 test 起独立后端，finally stop，无交叉污染。
+// Each test starts an independent backend and stops it in finally, with no cross-pollution.
 
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
 import { startBackend, apiFetch } from "./helpers.js";
 
-// b64urlEncodeObj 将对象 JSON 化后做 base64url 编码（Node 原生 Buffer 支持 'base64url'）。
+// b64urlEncodeObj JSON-serializes an object and base64url-encodes it (Node's Buffer supports 'base64url' natively).
 function b64urlEncodeObj(obj) {
   return Buffer.from(JSON.stringify(obj), "utf8").toString("base64url");
 }
 
-// forgeAlgNoneToken 构造一个 alg=none 的伪造 JWT：header alg 置为 "none"，签名段为空。
-// jwt.v5 的 Parse 在 keyFunc 中校验 method 必须是 *SigningMethodHMAC；alg=none 对应
-// *SigningMethodNone —— 即便"无签名"逻辑上可验证通过，keyFunc 也会先返回 error，
-// 从而映射到 1004。这是 §14 明确禁止移除的防御。
+// forgeAlgNoneToken builds a forged JWT with alg=none: the header alg is set to "none" and the
+// signature segment is empty. jwt.v5's Parse validates in keyFunc that the method must be
+// *SigningMethodHMAC; alg=none maps to *SigningMethodNone — so even though "no signature" would
+// logically verify, keyFunc returns an error first, which maps to 1004. This is exactly the
+// defense that §14 forbids removing.
 function forgeAlgNoneToken(overrides = {}) {
   const now = Math.floor(Date.now() / 1000);
   const header = { alg: "none", typ: "JWT" };
@@ -42,8 +47,9 @@ function forgeAlgNoneToken(overrides = {}) {
   return `${b64urlEncodeObj(header)}.${b64urlEncodeObj(payload)}.`;
 }
 
-// tamperPayload 解码真实 JWT 的 payload 段，用 mutator 改写后重新编码，拼回原 header +
-// 原签名。因为 payload 改变而签名未变，HMAC 校验必然失败 → 1004。
+// tamperPayload decodes a real JWT's payload segment, rewrites it with the mutator, re-encodes
+// it, and reassembles it with the original header + original signature. Because the payload
+// changed while the signature did not, the HMAC check necessarily fails → 1004.
 function tamperPayload(token, mutator) {
   const parts = token.split(".");
   assert.equal(parts.length, 3, "JWT must have 3 segments");
@@ -53,8 +59,9 @@ function tamperPayload(token, mutator) {
   return `${parts[0]}.${tamperedPayload}.${parts[2]}`;
 }
 
-// assertNoHash 断言 user 对象里 password_hash 为空或不存在。model.User 的 json tag 无
-// omitempty，sanitizeUser 把它清成 ""，所以同时接受 "" 与 undefined。
+// assertNoHash asserts that the user object's password_hash is empty or absent. model.User's
+// json tag has no omitempty, and sanitizeUser clears it to "", so both "" and undefined are
+// accepted.
 function assertNoHash(user, label) {
   const ph = user && user.password_hash;
   assert.ok(
@@ -68,7 +75,7 @@ async function fresh() {
 }
 
 describe("security boundaries (end-to-end)", () => {
-  // 1. 四条身份路径均不泄漏 password_hash
+  // 1. None of the four identity paths leak password_hash
   test("sanitizeUser: setup/login/sso_login/me never leak password_hash", async () => {
     const b = await fresh();
     try {
@@ -104,7 +111,7 @@ describe("security boundaries (end-to-end)", () => {
     }
   });
 
-  // 2. alg=none 伪造 → 1004
+  // 2. alg=none forgery → 1004
   test("JWT: alg=none forged token rejected → 1004", async () => {
     const b = await fresh();
     try {
@@ -119,7 +126,7 @@ describe("security boundaries (end-to-end)", () => {
     }
   });
 
-  // 3. payload 篡改（改 uid）→ 1004，且原 token 仍有效（排除后端不可用）
+  // 3. payload tampering (uid changed) → 1004, and the original token still works (rules out a dead backend)
   test("JWT: tampered payload (uid changed) rejected → 1004", async () => {
     const b = await fresh();
     try {
@@ -132,7 +139,7 @@ describe("security boundaries (end-to-end)", () => {
       });
       const { body } = await apiFetch(b.baseUrl, "GET", "/api/v1/me", { token: tampered });
       assert.equal(body.code, 1004);
-      // 原 token 仍可用，证明 1004 来自签名失配而非环境问题
+      // The original token still works, proving the 1004 comes from the signature mismatch, not an environment issue
       const ok = await apiFetch(b.baseUrl, "GET", "/api/v1/me", { token: real });
       assert.equal(ok.body.code, 0);
     } finally {
@@ -140,7 +147,7 @@ describe("security boundaries (end-to-end)", () => {
     }
   });
 
-  // 4. 跨后端 secret 隔离：A 的 token → B /me 1004
+  // 4. Cross-backend secret isolation: A's token → B /me 1004
   test("JWT: cross-backend token is invalid against a different secret → 1004", async () => {
     const a = await fresh();
     const bb = await fresh();
@@ -149,7 +156,7 @@ describe("security boundaries (end-to-end)", () => {
         json: { username: "admin", password: "admin123" },
       });
       const tokenFromA = setup.body.data.token;
-      // B 也初始化，排除"未初始化"干扰，聚焦签名校验
+      // Initialize B too, to rule out "not initialized" noise and focus on signature validation
       await apiFetch(bb.baseUrl, "POST", "/api/v1/setup", {
         json: { username: "admin", password: "admin123" },
       });
@@ -160,7 +167,7 @@ describe("security boundaries (end-to-end)", () => {
     }
   });
 
-  // 5. logout stateless：登出后同 token 仍可鉴权（无服务端黑名单，§6 契约）
+  // 5. logout is stateless: the same token still authenticates after logout (no server-side blacklist, §6 contract)
   test("logout: stateless no-op — same token still authenticates after logout", async () => {
     const b = await fresh();
     try {
@@ -170,7 +177,7 @@ describe("security boundaries (end-to-end)", () => {
       const token = setup.body.data.token;
       const out = await apiFetch(b.baseUrl, "POST", "/api/v1/logout", { token });
       assert.equal(out.body.code, 0);
-      // 登出后同 token 仍能驱动 /me
+      // After logout the same token can still drive /me
       const me = await apiFetch(b.baseUrl, "GET", "/api/v1/me", { token });
       assert.equal(me.body.code, 0);
       assert.equal(me.body.data.user.username, "admin");
@@ -179,14 +186,14 @@ describe("security boundaries (end-to-end)", () => {
     }
   });
 
-  // 6. 已过期 token 端到端被拒（jwtTtl=-1 → exp = now - 60s，签发即过期）
+  // 6. An already-expired token is rejected end-to-end (jwtTtl=-1 → exp = now - 60s, issued already expired)
   test("JWT: expired token rejected end-to-end → 1004", async () => {
     const b = await startBackend({ jwtTtl: -1 });
     try {
       const setup = await apiFetch(b.baseUrl, "POST", "/api/v1/setup", {
         json: { username: "admin", password: "admin123" },
       });
-      // setup 成功（Sign 只编码+签名，不校验 exp），但 token 已过期
+      // setup succeeds (Sign only encodes + signs, it does not validate exp), but the token is already expired
       assert.equal(setup.body.code, 0);
       const expired = setup.body.data.token;
       const me = await apiFetch(b.baseUrl, "GET", "/api/v1/me", { token: expired });
@@ -196,7 +203,7 @@ describe("security boundaries (end-to-end)", () => {
     }
   });
 
-  // 7. WS 错误/伪造 query token 在升级前被拒（1004，fetch 拿到 JSON envelope）
+  // 7. WS garbage / forged query tokens are rejected before the upgrade (1004, fetch receives a JSON envelope)
   test("WS: garbage and alg=none query tokens are rejected before upgrade → 1004", async () => {
     const b = await fresh();
     try {
@@ -204,7 +211,7 @@ describe("security boundaries (end-to-end)", () => {
         json: { username: "admin", password: "admin123" },
       });
       const token = setup.body.data.token;
-      // 建一个真实 session 拿合法 id，确保 1004 是 token 问题而非 not-found
+      // Create a real session to get a valid id, ensuring the 1004 is about the token, not not-found
       const tpl = await apiFetch(b.baseUrl, "POST", "/api/v1/templates", {
         token,
         json: { name: "ws-sectok-tpl", command: "/bin/bash", args: ["-c", "sleep 5"], cwd: "/tmp" },
@@ -224,7 +231,7 @@ describe("security boundaries (end-to-end)", () => {
       const j2 = await r2.json();
       assert.equal(j2.code, 1004);
 
-      // 清理：合法 token DELETE
+      // Cleanup: DELETE with a valid token
       await apiFetch(b.baseUrl, "DELETE", `/api/v1/sessions/${sid}`, { token });
     } finally {
       await b.stop();

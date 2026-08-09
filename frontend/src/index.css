@@ -85,8 +85,9 @@
 }
 
 .dark {
-    /* 深色版调色板对齐 Figma 暖中性深色稿(见 docs/superpowers/specs/2026-07-20-dark-mode-design.md)。
-       变量值用 Figma hex 直写,与设计稿像素级一致,零 oklch 转换漂移。*/
+    /* Dark palette aligned with the Figma warm-neutral dark draft (see
+       docs/superpowers/specs/2026-07-20-dark-mode-design.md). Variable values are written directly
+       as Figma hex, pixel-identical to the design, with zero oklch conversion drift. */
     --background: #202020;
     --foreground: #e2e8f0;
     --card: #282828;
