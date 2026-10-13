@@ -17,7 +17,7 @@
     "test:integration": "cd tests && node --test --test-concurrency=1"
   },
   "devDependencies": {
-    "concurrently": "^9.2.4"
+    "concurrently": "^9.2.5"
   },
   "author": "",
   "license": "ISC"
